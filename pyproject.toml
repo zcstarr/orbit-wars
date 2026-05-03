@@ -1,0 +1,18 @@
+[project]
+name = "orbit-wars"
+version = "0.1.0"
+description = "Workspace for the Kaggle orbit_wars environment: agents, run harness, and hot-reload replay viewer."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "kaggle-environments>=1.28.0",
+    "numpy>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "ipython>=9.0",
+]
+
+[tool.uv]
+package = false
