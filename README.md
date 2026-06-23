@@ -117,6 +117,26 @@ python build_dataset.py --workers 8             # parallel workers for fleet_sta
 
 Tune `dataset_config.yaml` for the filter (`end_reasons`, `max_silent_ticks`, `require_no_froze`), per-count selection (`groups`), `chunk_size_n` (recorded for the downstream encoder, not applied here), and which heavy tables to extract (`include_*`).
 
+## Diffusion policy (lean v1)
+
+Winner-conditioned action-chunk diffusion. Spec: [orbit_wars_diffusion_lean_spec.md](orbit_wars_diffusion_lean_spec.md) (full fleet design: [orbit_wars_diffusion_dataset_spec.md](orbit_wars_diffusion_dataset_spec.md)).
+
+Prereq: `dataset_out/` from `build_dataset.py` with `planet_state` and `actions` enabled.
+
+### Run
+
+```bash
+source .venv/bin/activate
+python train_orbit.py build-cache                    # parquet -> cache/episodes/*.pt
+python train_orbit.py train --config orbit_train.yaml
+python train_orbit.py eval --checkpoint checkpoints/latest.pt
+python train_orbit.py sample --checkpoint checkpoints/latest.pt
+```
+
+`EpisodeLRU` in `train_orbit.py` loads/unloads episode `.pt` caches; call `.clear()` to drop them from memory.
+
+Checkpoints under `checkpoints/` store encoder + denoiser + DDPM schedule + configs in one file (`load_checkpoint`).
+
 ## Files
 
 - `getting-started.ipynb` — tutorial walking through observations, agent design, and submission.
@@ -129,4 +149,9 @@ Tune `dataset_config.yaml` for the filter (`end_reasons`, `max_silent_ticks`, `r
 - `generate_parquet_db.py` — parse cached replay JSONs into the Parquet DB (`parquet_out/`).
 - `build_dataset.py` — select winning games + extract heavy tables into a training dataset (`dataset_out/`).
 - `dataset_config.yaml` — config consumed by `build_dataset.py`.
+- `dataset_schema.json` — JSON Schema for the winner-game dataset layout.
+- `orbit_wars_diffusion_lean_spec.md` — lean v1 diffusion policy spec (planets-only obs).
+- `orbit_wars_diffusion_dataset_spec.md` — full diffusion spec (fleet physics, reference).
+- `train_orbit.py` — cache build, data load/unload, train/val/sample, checkpoints.
+- `orbit_train.yaml` — optional training config for `train_orbit.py`.
 - `LLMLOG.MD` — log of agent-driven changes.

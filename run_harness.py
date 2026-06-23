@@ -16,11 +16,15 @@ from pathlib import Path
 from kaggle_environments import make
 
 from agents import holding_player_unit_test, nearest_planet_sniper, never_miss
+from ddpm_act import make_ddpm_agent
 
 # Edit this list to change who plays. 2 or 4 entries.
 # Each entry is either a callable (agent fn) or a string ("random").
-AGENTS = [nearest_planet_sniper, holding_player_unit_test]
+CHECKPOINT = Path(__file__).resolve().parent / "checkpoints" / "step_1800500.pt"
+ddpm_agent = make_ddpm_agent(CHECKPOINT)
+AGENTS = [ddpm_agent, nearest_planet_sniper, nearest_planet_sniper, nearest_planet_sniper]
 # AGENTS = [never_miss, holding_player_unit_test]
+# AGENTS = [nearest_planet_sniper, holding_player_unit_test]
 
 WIDTH, HEIGHT = 800, 600
 

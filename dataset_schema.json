@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orbit-wars/dataset_schema.json",
+  "title": "Orbit Wars winner-game dataset",
+  "description": "Reference schema for the dataset directory produced by build_dataset.py (driven by dataset_config.yaml). Each parquet file is modeled as an array of row objects. Arrow physical types are noted per column in `arrowType`. Join key across all tables is `episode_id`; orient everything winner-centric via `winner_slot` in selected_games.",
+  "type": "object",
+  "required": [
+    "selected_games.parquet",
+    "selected_players.parquet",
+    "player_stats.parquet",
+    "resolved_config.yaml"
+  ],
+  "properties": {
+    "selected_games.parquet": {
+      "description": "Spine: one row per WON game (the winning player's player_episodes row joined with episode metadata). Drives extraction of all games/*.parquet tables.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/selectedGameRow" }
+    },
+    "selected_players.parquet": {
+      "description": "Players that cleared their per-group bar (win_rate >= threshold AND games >= min_games). One row per (name, n_players) group.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/playerStatRow" }
+    },
+    "player_stats.parquet": {
+      "description": "Win-rate stats for ALL players per group (pre-threshold). Same shape as selected_players.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/playerStatRow" }
+    },
+    "games/actions.parquet": {
+      "description": "Optional (include_actions). Fleet-launch commands per slot per tick (winner + opponents). Sparse: only ticks where a slot acted. These are the action targets to model.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/actionRow" }
+    },
+    "games/tick_summary.parquet": {
+      "description": "Optional (include_tick_summary). Per-tick per-slot aggregate state. Note: ships_fleets/n_fleets are COUNTS only; individual fleet positions live in fleet_state.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/tickSummaryRow" }
+    },
+    "games/episode_planets.parquet": {
+      "description": "Optional (include_episode_planets). Static initial board layout, one row per planet per game.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/episodePlanetRow" }
+    },
+    "games/planet_state.parquet": {
+      "description": "Optional (include_planet_state, heavy ~600MB+). Per-planet per-tick ownership/ships trajectory. owner == -1 is neutral.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/planetStateRow" }
+    },
+    "games/fleet_state.parquet": {
+      "description": "Optional (include_fleet_state). Per-fleet per-tick positions, parsed from raw replay JSONs (NOT in the parquet DB). May be incomplete if some raw JSONs aren't downloaded yet (re-run to backfill).",
+      "type": "array",
+      "items": { "$ref": "#/$defs/fleetStateRow" }
+    },
+    "resolved_config.yaml": {
+      "description": "The exact resolved config used for this build plus selection counts; makes the dataset self-describing/reproducible.",
+      "$ref": "#/$defs/resolvedConfig"
+    }
+  },
+  "$defs": {
+    "playerStatRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "games", "wins", "win_rate", "n_players"],
+      "properties": {
+        "name": { "type": "string", "description": "Player name." },
+        "games": { "type": "integer", "minimum": 0, "description": "Clean games played within this n_players group." },
+        "wins": { "type": "integer", "minimum": 0, "description": "Games won within this group." },
+        "win_rate": { "type": "number", "minimum": 0, "maximum": 1, "description": "wins / games, computed WITHIN the player count." },
+        "n_players": { "type": "integer", "description": "The player-count group (e.g. 2 or 4)." }
+      }
+    },
+    "selectedGameRow": {
+      "type": "object",
+      "description": "Winner's player row + episode metadata. episode_id is the join key; winner_slot is the winning slot.",
+      "additionalProperties": true,
+      "required": ["episode_id", "winner_slot", "name", "n_players"],
+      "properties": {
+        "episode_id": { "type": "integer", "arrowType": "int32", "description": "Kaggle episode id; join key for all tables." },
+        "winner_slot": { "type": "integer", "arrowType": "int8", "description": "Slot of the winning player (player_episodes.slot, renamed). 0..n_players-1." },
+        "name": { "type": "string", "description": "Winning player name." },
+        "reward": { "type": "number", "arrowType": "float32" },
+        "is_winner": { "type": "integer", "arrowType": "int8", "enum": [0, 1], "description": "Always 1 here (won games only)." },
+        "status": { "type": "string", "description": "Engine end status for this slot (e.g. DONE)." },
+        "n_actions": { "type": "integer", "arrowType": "int32", "description": "Total actions the winner issued." },
+        "last_action_tick": { "type": "integer", "arrowType": "int16" },
+        "last_alive_tick": { "type": "integer", "arrowType": "int16", "description": "Last tick this slot owned a planet or fleet." },
+        "opponent_n_actions": { "type": "integer", "arrowType": "int32" },
+        "opponent_last_action_tick": { "type": "integer", "arrowType": "int16" },
+        "opponent_last_alive_tick": { "type": "integer", "arrowType": "int16" },
+        "opponent_silent_ticks": { "type": "integer", "arrowType": "int16", "description": "Ticks the primary opponent was alive but issued no action." },
+        "opponent_status": { "type": "string" },
+        "opponent_timed_out": { "type": "integer", "arrowType": "int8", "enum": [0, 1] },
+        "opponent_froze": { "type": "integer", "arrowType": "int8", "enum": [0, 1], "description": "1 if opponent never acted while alive / engine-errored." },
+        "n_players": { "type": "integer", "arrowType": "int8", "description": "Player count for this game." },
+        "end_reason": { "type": "string", "enum": ["step_limit", "domination", "agent_error", "mutual_destruction"], "description": "Filtered to clean reasons (config end_reasons)." },
+        "dataset": { "type": "string", "description": "Source daily dataset label." },
+        "n_steps": { "type": "integer", "arrowType": "int16" },
+        "seed": { "type": "integer", "arrowType": "int32" },
+        "angular_velocity": { "type": "number", "arrowType": "float32" },
+        "n_planets": { "type": "integer", "arrowType": "int8" },
+        "n_comets": { "type": "integer", "arrowType": "int8" },
+        "final_step": { "type": "integer", "arrowType": "int16" }
+      }
+    },
+    "actionRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["episode_id", "tick", "slot", "src_planet_id", "angle", "n_ships"],
+      "properties": {
+        "episode_id": { "type": "integer", "arrowType": "int32" },
+        "tick": { "type": "integer", "arrowType": "int16", "description": "Game turn." },
+        "slot": { "type": "integer", "arrowType": "int8", "description": "Acting player slot." },
+        "src_planet_id": { "type": "integer", "arrowType": "int16", "description": "Planet the fleet launches from." },
+        "angle": { "type": "number", "arrowType": "float32", "description": "Launch angle (radians)." },
+        "n_ships": { "type": "integer", "arrowType": "int32", "description": "Ships dispatched." }
+      }
+    },
+    "tickSummaryRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["episode_id", "tick", "slot", "ships_planets", "ships_fleets", "total_ships", "production", "n_planets", "n_fleets"],
+      "properties": {
+        "episode_id": { "type": "integer", "arrowType": "int32" },
+        "tick": { "type": "integer", "arrowType": "int16" },
+        "slot": { "type": "integer", "arrowType": "int8" },
+        "ships_planets": { "type": "integer", "arrowType": "int32", "description": "Ships sitting on this slot's planets." },
+        "ships_fleets": { "type": "integer", "arrowType": "int32", "description": "Ships in this slot's in-flight fleets." },
+        "total_ships": { "type": "integer", "arrowType": "int32" },
+        "production": { "type": "integer", "arrowType": "int16" },
+        "n_planets": { "type": "integer", "arrowType": "int8", "description": "Planets owned by this slot." },
+        "n_fleets": { "type": "integer", "arrowType": "int16", "description": "In-flight fleet count for this slot." }
+      }
+    },
+    "episodePlanetRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["episode_id", "planet_id", "initial_x", "initial_y", "radius", "production", "orbit_radius", "is_static", "is_comet", "initial_ships", "initial_owner"],
+      "properties": {
+        "episode_id": { "type": "integer", "arrowType": "int32" },
+        "planet_id": { "type": "integer", "arrowType": "int16" },
+        "initial_x": { "type": "number", "arrowType": "float32" },
+        "initial_y": { "type": "number", "arrowType": "float32" },
+        "radius": { "type": "number", "arrowType": "float32" },
+        "production": { "type": "integer", "arrowType": "int8" },
+        "orbit_radius": { "type": "number", "arrowType": "float32" },
+        "is_static": { "type": "boolean", "arrowType": "bool", "description": "True if the planet does not orbit." },
+        "is_comet": { "type": "boolean", "arrowType": "bool" },
+        "initial_ships": { "type": "integer", "arrowType": "int16" },
+        "initial_owner": { "type": "integer", "arrowType": "int8", "description": "-1 = neutral." }
+      }
+    },
+    "planetStateRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["episode_id", "tick", "planet_id", "owner", "ships"],
+      "properties": {
+        "episode_id": { "type": "integer", "arrowType": "int32" },
+        "tick": { "type": "integer", "arrowType": "int16" },
+        "planet_id": { "type": "integer", "arrowType": "int16" },
+        "owner": { "type": "integer", "arrowType": "int8", "description": "Owning slot, or -1 for neutral." },
+        "ships": { "type": "integer", "arrowType": "int32" }
+      }
+    },
+    "fleetStateRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["episode_id", "tick", "fleet_id", "owner", "x", "y", "angle", "from_planet_id", "ships"],
+      "properties": {
+        "episode_id": { "type": "integer", "arrowType": "int32" },
+        "tick": { "type": "integer", "arrowType": "int16" },
+        "fleet_id": { "type": "integer", "arrowType": "int16" },
+        "owner": { "type": "integer", "arrowType": "int8" },
+        "x": { "type": "number", "arrowType": "float32" },
+        "y": { "type": "number", "arrowType": "float32" },
+        "angle": { "type": "number", "arrowType": "float32" },
+        "from_planet_id": { "type": "integer", "arrowType": "int16", "description": "Planet the fleet launched from." },
+        "ships": { "type": "integer", "arrowType": "int32" }
+      }
+    },
+    "groupSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["win_rate_threshold", "min_games"],
+      "properties": {
+        "win_rate_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "min_games": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "resolvedConfig": {
+      "type": "object",
+      "description": "Mirror of dataset_config.yaml as resolved at build time, plus selection counts.",
+      "properties": {
+        "parquet_dir": { "type": "string" },
+        "out_dir": { "type": "string" },
+        "data_root": { "type": "string" },
+        "end_reasons": { "type": "array", "items": { "type": "string" } },
+        "max_silent_ticks": { "type": "integer" },
+        "require_no_froze": { "type": "boolean" },
+        "groups": {
+          "type": "object",
+          "description": "Per-player-count selection bars, keyed by player count (e.g. \"2\", \"4\").",
+          "additionalProperties": { "$ref": "#/$defs/groupSpec" }
+        },
+        "chunk_size_n": { "type": "integer", "description": "Intended action-chunk length for the downstream encoder (NOT applied here)." },
+        "include_actions": { "type": "boolean" },
+        "include_tick_summary": { "type": "boolean" },
+        "include_episode_planets": { "type": "boolean" },
+        "include_planet_state": { "type": "boolean" },
+        "include_fleet_state": { "type": "boolean" },
+        "_selected_players": { "type": "integer", "description": "Total selected player-groups." },
+        "_selected_games": { "type": "integer", "description": "Total distinct won games selected." }
+      }
+    }
+  }
+}

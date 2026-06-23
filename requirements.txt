@@ -19,6 +19,7 @@ tqdm>=4.66
 torchinfo>=1.8
 scipy>=1.11
 seaborn>=0.13
+wandb>=0.16
 
 # Jupyter
 ipykernel>=6.29
