@@ -137,6 +137,24 @@ python train_orbit.py sample --checkpoint checkpoints/latest.pt
 
 Checkpoints under `checkpoints/` store encoder + denoiser + DDPM schedule + configs in one file (`load_checkpoint`).
 
+## Pack a submission
+
+`pack.py` bundles `ddpm_act.py` + its import closure + a trained checkpoint into a Kaggle-ready `submission.tar.gz`. It generates a top-level `main.py` whose last `def` (`agent`) is the Kaggle entrypoint, forcing CPU since the eval image has no GPU. Torch/pandas/yaml are preinstalled on the Kaggle image, so no requirements/wheels are vendored.
+
+Prereq: a trained checkpoint under `checkpoints/` (default `checkpoints/step_1800500.pt`).
+
+### Run
+
+```bash
+source .venv/bin/activate
+python pack.py                                              # -> submission.tar.gz
+python pack.py --smoke                                      # build, then run one synthetic turn in a fresh subprocess
+python pack.py --checkpoint checkpoints/latest.pt --out my_sub.tar.gz
+python pack.py --keep-build                                 # keep build/submission/ staging dir
+```
+
+`--smoke` imports the packed bundle with cwd = bundle dir (mimicking Kaggle's flat layout) and runs one synthetic turn, catching missing-file / import-path / `torch.load` failures before a submission is spent. After building, the command prints the `kaggle competitions submit` line to copy.
+
 ## Files
 
 - `getting-started.ipynb` — tutorial walking through observations, agent design, and submission.
@@ -154,4 +172,6 @@ Checkpoints under `checkpoints/` store encoder + denoiser + DDPM schedule + conf
 - `orbit_wars_diffusion_dataset_spec.md` — full diffusion spec (fleet physics, reference).
 - `train_orbit.py` — cache build, data load/unload, train/val/sample, checkpoints.
 - `orbit_train.yaml` — optional training config for `train_orbit.py`.
+- `ddpm_act.py` — Kaggle-side inference adapter; `make_ddpm_agent` loads a checkpoint into an `agent(obs)` callable.
+- `pack.py` — bundle `ddpm_act.py` + closure + checkpoint into `submission.tar.gz` (`--smoke` to verify).
 - `LLMLOG.MD` — log of agent-driven changes.
