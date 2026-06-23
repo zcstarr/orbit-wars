@@ -118,7 +118,7 @@ class ModelConfig:
     dropout: float = 0.1
     num_timesteps: int = 100
     beta_start: float = 1e-4
-    beta_end: float = 0.02
+    beta_end: float = 0.20
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
