@@ -1,5 +1,4 @@
 import math
-import numpy as np
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet, Fleet
 import utils
 
@@ -38,9 +37,6 @@ def never_miss(obs):
 def nearest_planet_sniper(obs):
     classifier = utils.make_classifier(obs)
 
-    num_ships = len(obs.get('fleets', []))
-    speed = 1.0 + (6.0 - 1.0) * (np.log(num_ships) / np.log(1000)) ** 1.5
-    print(f"fleet speed: {speed}")
     moves = []
     player = obs.get("player", 0) if isinstance(obs, dict) else obs.player
     raw_planets = obs.get("planets", []) if isinstance(

@@ -50,9 +50,14 @@ from pathlib import Path
 import ddpm_act
 from ddpm_act import make_ddpm_agent
 
+# To ship the post-model aim corrector, add ``correct_misses=True`` below (it is
+# off by default in the adapter). It snaps a missed sampled launch to a
+# lead/intercept on the nearest intended planet; CPU cost is a bounded per-miss
+# loop over <=60 planets, well within the Kaggle 1s/turn budget.
 _AGENT = make_ddpm_agent(
     Path(ddpm_act.__file__).resolve().parent / "checkpoint.pt",
     device="cpu",
+    correct_misses=True,
 )
 
 

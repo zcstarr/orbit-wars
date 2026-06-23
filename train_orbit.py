@@ -133,7 +133,7 @@ class TrainConfig:
     dataset_dir: pathlib.Path = REPO_ROOT / "dataset_out"
     cache_dir: pathlib.Path = REPO_ROOT / "cache"
     checkpoint_dir: pathlib.Path = REPO_ROOT / "checkpoints"
-    batch_size: int = 32
+    batch_size: int =512 
     num_workers: int = 4
     lr: float = 3e-4
     epochs: int = 10
@@ -141,7 +141,11 @@ class TrainConfig:
     train_fraction: float = 0.80
     valid_fraction: float = 0.10
     log_every: int = 50
-    save_every: int = 500
+    save_every: int = 10000
+    # Cap epoch-boundary validation: evaluate() runs full 100-step ancestral
+    # sampling per batch, so the whole 1.4M-sample valid set is ~273k denoiser
+    # passes of silent GPU churn (looks like a hang). 0 = no cap (old behavior).
+    eval_max_batches: int = 50
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     use_wandb: bool = False
     wandb_project: str = "orbit-wars"
@@ -972,7 +976,16 @@ class ObsEncoder(nn.Module):
 
 
 class ActionDenoiser(nn.Module):
-    """Error predictor: eps_theta = f(x_t, diffusion_t, observation)."""
+    """Error predictor: eps_theta = f(x_t, diffusion_t, observation).
+
+    Per-planet token denoiser. The noisy action chunk [B,H,P,A] is reshaped so
+    *planet* is the token axis (each token carries that planet's H*A noisy
+    action), then fused with the encoder's per-planet observation token so
+    planet i's denoising is conditioned on planet i's own state (distance,
+    garrison, ownership). Self-attention over planets lets a source planet read
+    other planets' garrisons/positions (coordination + targeting) — the flat
+    MLP this replaces pooled all of that away into a single board average.
+    """
 
     def __init__(
         self,
@@ -984,19 +997,41 @@ class ActionDenoiser(nn.Module):
         self.p_max = feature_cfg.p_max
         self.action_dim = feature_cfg.action_dim
         d = model_cfg.d_model
+        per_planet = self.horizon * self.action_dim
 
-        flat_in = self.horizon * self.p_max * self.action_dim
         self.time_embed = TimestepEmbedding(d, hidden_dim=d * 2)
-        self.noisy_proj = nn.Linear(flat_in, d)
-        self.cond_proj = nn.Linear(d * 2, d)
+        # Per-planet noisy action -> token (16 dims in, not 960 flattened).
+        self.in_proj = nn.Linear(per_planet, d)
+        # board + global summary -> a single context token prepended to the seq.
+        self.global_proj = nn.Linear(d * 2, d)
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d,
+            nhead=model_cfg.n_heads,
+            dim_feedforward=d * 2,
+            dropout=model_cfg.dropout,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.blocks = nn.TransformerEncoder(
+            enc_layer, num_layers=model_cfg.n_layers, enable_nested_tensor=False
+        )
+
+        # AdaLN-style FiLM from the diffusion timestep, broadcast over planets.
         self.film = nn.Sequential(
             nn.SiLU(),
             nn.Linear(d, d * 2),
         )
         self.out = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(d, flat_in),
+            nn.Linear(d, per_planet),
         )
+
+        # Zero-init FiLM so scale=shift=0 at start -> identity modulation; the
+        # denoiser begins as a clean residual stream and learns conditioning
+        # gradually (DiT AdaLN-zero trick, stabilizes early diffusion training).
+        nn.init.zeros_(self.film[-1].weight)
+        nn.init.zeros_(self.film[-1].bias)
 
     def forward(
         self,
@@ -1005,20 +1040,40 @@ class ActionDenoiser(nn.Module):
         cond: Dict[str, torch.Tensor],
     ) -> torch.Tensor:
         b = x_t.shape[0]
-        flat = x_t.reshape(b, -1)
-        h = self.noisy_proj(flat)
 
-        cond_vec = torch.cat(
-            [cond["board_token"], cond["global_token"]], dim=-1
-        ).squeeze(1)
-        h = h + self.cond_proj(cond_vec)
+        # [B,H,P,A] -> [B,P,H*A]: planet is the token axis.
+        a = x_t.permute(0, 2, 1, 3).reshape(b, self.p_max, -1)
+        h = self.in_proj(a)
+        # Index-aligned fusion: action token i shares the residual stream with
+        # planet i's observation token (distance / garrison / ownership).
+        h = h + cond["planet_tokens"]
 
-        t_emb = self.time_embed(t)
-        scale, shift = self.film(t_emb).chunk(2, dim=-1)
-        h = h * (1.0 + scale) + shift
+        # Time FiLM, broadcast across the planet axis.
+        scale, shift = self.film(self.time_embed(t)).chunk(2, dim=-1)
+        h = h * (1.0 + scale).unsqueeze(1) + shift.unsqueeze(1)
 
-        out = self.out(h).reshape(b, self.horizon, self.p_max, self.action_dim)
-        return out
+        # Prepend a board/global summary token so every planet can attend to a
+        # cheap whole-board context vector in addition to other planets.
+        gtok = self.global_proj(
+            torch.cat([cond["board_token"], cond["global_token"]], dim=-1)
+        )  # [B,1,d]
+        h = torch.cat([gtok, h], dim=1)
+
+        # Don't attend *to* nonexistent planet slots; the summary token (col 0)
+        # is always valid. (planet_mask = active mask, NOT the source mask: we
+        # want enemy/neutral planets visible as keys for targeting.)
+        pad = torch.cat(
+            [
+                torch.zeros(b, 1, dtype=torch.bool, device=h.device),
+                ~cond["planet_mask"],
+            ],
+            dim=1,
+        )
+        h = self.blocks(h, src_key_padding_mask=pad)[:, 1:]
+
+        # [B,P,H*A] -> [B,H,P,A].
+        out = self.out(h).reshape(b, self.p_max, self.horizon, self.action_dim)
+        return out.permute(0, 2, 1, 3).contiguous()
 
 
 def build_model(
@@ -1053,6 +1108,7 @@ def evaluate(
     encoder: ObsEncoder,
     loader: DataLoader,
     device: torch.device,
+    max_batches: int = 0,
 ) -> Dict[str, float]:
     ddpm.eval_mode()
     encoder.eval()
@@ -1061,7 +1117,18 @@ def evaluate(
     angle_errs: List[float] = []
     frac_errs: List[float] = []
 
-    for batch in loader:
+    # Each batch does a full 100-step ancestral sample, so the unbounded valid
+    # set (~2.7k batches) is an interminable, silent GPU grind. Bound it + log.
+    n_batches = len(loader) if max_batches <= 0 else min(max_batches, len(loader))
+    t0 = time.perf_counter()
+    for i, batch in enumerate(loader):
+        if max_batches > 0 and i >= max_batches:
+            break
+        if i % 10 == 0:
+            logger.info(
+                "eval: batch %d/%d (%.1fs)", i, n_batches,
+                time.perf_counter() - t0,
+            )
         batch = _move_batch(batch, device)
         x_0 = batch["action_target"]
         cond = encoder(batch)
@@ -1082,11 +1149,15 @@ def evaluate(
 
         launch_mask = tgt_launch & src
         if launch_mask.any():
-            tgt_a = batch["action_target"][..., 1:3]
-            pred_a = pred[..., 1:3]
+            # Normalize both to unit (sin,cos) before measuring the angle, matching
+            # the deployment decoder (which divides by the vector norm). The raw
+            # diffusion sample is not unit-length; without this the un-normalized
+            # magnitude leaked through dot.clamp and biased the error toward pi/2.
+            tgt_a = F.normalize(batch["action_target"][..., 1:3], dim=-1, eps=1e-6)
+            pred_a = F.normalize(pred[..., 1:3], dim=-1, eps=1e-6)
             dot = (tgt_a * pred_a).sum(-1)
             cross = tgt_a[..., 0] * pred_a[..., 1] - tgt_a[..., 1] * pred_a[..., 0]
-            ang = torch.abs(torch.atan2(cross, dot.clamp(-1, 1)))
+            ang = torch.abs(torch.atan2(cross, dot))
             angle_errs.extend(ang[launch_mask].cpu().tolist())
 
             tgt_frac = (batch["action_target"][..., 3] + 1) / 2
@@ -1158,6 +1229,7 @@ def train(
     train_cfg: TrainConfig,
     feature_cfg: FeatureConfig,
     model_cfg: ModelConfig,
+    resume_from: Optional[pathlib.Path] = None,
 ) -> None:
     device = torch.device(train_cfg.device)
     manifest = pd.read_parquet(train_cfg.cache_dir / "samples.parquet")
@@ -1184,6 +1256,23 @@ def train(
     opt = torch.optim.AdamW(params, lr=train_cfg.lr)
     global_step = 0
     train_cfg.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resume: restore weights + optimizer + step counter so training continues
+    # from where it stalled (step numbering / checkpoint names keep climbing).
+    if resume_from is not None:
+        ckpt = torch.load(resume_from, map_location=device, weights_only=False)
+        encoder.load_state_dict(ckpt["encoder"])
+        denoiser.load_state_dict(ckpt["denoiser"])
+        if "optimizer" in ckpt:
+            opt.load_state_dict(ckpt["optimizer"])
+        global_step = int(ckpt.get("step", 0))
+        # CLI lr (yaml) overrides whatever the saved optimizer carried.
+        for g in opt.param_groups:
+            g["lr"] = train_cfg.lr
+        logger.info(
+            "resumed from %s at step=%d (lr=%g)",
+            resume_from, global_step, train_cfg.lr,
+        )
 
     n_train = len(train_loader.dataset)
     n_valid = len(valid_loader.dataset)
@@ -1229,6 +1318,8 @@ def train(
 
                 opt.zero_grad()
                 loss.backward()
+                # No LR warmup at batch=512; clip to absorb early-step spikes.
+                torch.nn.utils.clip_grad_norm_(params, 1.0)
                 opt.step()
                 global_step += 1
 
@@ -1265,7 +1356,10 @@ def train(
                 if global_step % train_cfg.save_every == 0:
                     _save(train_cfg.checkpoint_dir / f"step_{global_step}.pt")
 
-            val_metrics = evaluate(ddpm, encoder, valid_loader, device)
+            val_metrics = evaluate(
+                ddpm, encoder, valid_loader, device,
+                max_batches=train_cfg.eval_max_batches,
+            )
             logger.info("epoch=%d valid %s", epoch, val_metrics)
             if run is not None:
                 run.log(
@@ -1342,9 +1436,15 @@ def main():
     ap.add_argument("--dataset-dir", type=pathlib.Path, default=REPO_ROOT / "dataset_out")
     ap.add_argument("--cache-dir", type=pathlib.Path, default=REPO_ROOT / "cache")
     ap.add_argument("--checkpoint", type=pathlib.Path, default=REPO_ROOT / "checkpoints" / "latest.pt")
+    ap.add_argument(
+        "--resume",
+        type=pathlib.Path,
+        default=None,
+        help="resume train from this checkpoint (restores weights/optimizer/step)",
+    )
     ap.add_argument("--config", type=pathlib.Path, help="optional orbit_train.yaml")
-    ap.add_argument("--epochs", type=int, default=10)
-    ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--epochs", type=int, default=None)
+    ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument(
         "--workers",
@@ -1400,7 +1500,7 @@ def main():
             workers=args.workers,
         )
     elif args.command == "train":
-        train(train_cfg, feature_cfg, model_cfg)
+        train(train_cfg, feature_cfg, model_cfg, resume_from=args.resume)
     elif args.command == "eval":
         device = torch.device(train_cfg.device)
         ddpm, encoder, _, _ = load_checkpoint(args.checkpoint, device)
