@@ -1,0 +1,44 @@
+# Orbit Wars winner-game dataset config.
+# Consumed by build_dataset.py. All params are recorded into the output dir
+# (resolved_config.yaml) so a dataset is fully reproducible / self-describing.
+
+# --- IO ---
+parquet_dir: parquet_out          # source DB (output of generate_parquet_db.py)
+out_dir: dataset_out              # where the selected-game dataset is written
+data_root: episode_data           # raw replay JSONs (only used for fleet_state)
+
+# --- game-quality filter (mirrors the notebook's win-rate cell) ---
+end_reasons: [step_limit, domination]   # cleanly-decided games; drops agent_error
+max_silent_ticks: 75                    # drop game if any opponent went silent > this while alive
+require_no_froze: true                  # drop game if any participant never acted / engine-errored
+
+# --- player selection, per player-count ---
+# Win-rate is only comparable WITHIN a fixed player count (2p baseline ~50%,
+# 4p baseline ~25%), so thresholds are set per group. The final dataset is the
+# UNION of all groups. 4p has a smaller pool, hence the lower bar.
+# A player who clears the bar in both 2p and 4p contributes games from both.
+groups:
+  2:
+    win_rate_threshold: 0.55        # ~1.1x the 50% baseline
+    min_games: 25
+  4:
+    win_rate_threshold: 0.35        # ~1.4x the 25% baseline
+    min_games: 10                   # lower this if you want more 4p volume
+
+# --- downstream chunking (NOT applied here; stored for the encoder) ---
+# Core training unit = the winner's actions over n consecutive turns (action chunk).
+chunk_size_n: 4
+
+# --- heavy-table extraction for the selected (won) games ---
+# Each is filtered down to only the selected episode_ids (all slots kept so the
+# encoder has opponent context; winner_slot lives in selected_games.parquet).
+include_actions: true             # winner+opponent fleet commands (the action targets)
+include_tick_summary: true        # per-tick per-slot aggregates (cheap state context)
+include_episode_planets: true     # initial board layout per game
+include_planet_state: true        # per-planet per-tick (owner, ships) -> board-state trajectory
+                                   #   aligned to the winner's next-n-turn action chunks.
+                                   #   ~670MB filtered; disable with --no-planet-state.
+include_fleet_state: true         # per-fleet per-tick (x, y, angle, from_planet_id, ships).
+                                   #   NOT in the parquet DB -> parsed from raw replay JSONs in
+                                   #   data_root for the selected games (needs them downloaded).
+                                   #   disable with --no-fleet-state.

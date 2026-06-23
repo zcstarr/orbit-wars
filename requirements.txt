@@ -1,0 +1,25 @@
+# CUDA PyTorch wheels (cu130 matches driver CUDA 13.x on this machine).
+# Install into the existing venv:
+#   uv pip install -r requirements.txt --python .venv/bin/python
+# Or let uv pick the backend from the GPU:
+#   uv pip install -r requirements.txt --python .venv/bin/python --torch-backend=auto
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+# Core competition / data
+kaggle-environments>=1.28.0
+numpy>=2.0
+kaggle>=1.7
+
+# ML / diffusion notebook stack
+torch
+torchvision
+torchaudio
+matplotlib>=3.8
+tqdm>=4.66
+torchinfo>=1.8
+scipy>=1.11
+seaborn>=0.13
+
+# Jupyter
+ipykernel>=6.29
+jupyterlab>=4.0

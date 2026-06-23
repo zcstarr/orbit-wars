@@ -53,6 +53,70 @@ To change the matchup, edit the `AGENTS` list at the top of `run_harness.py` (e.
 - **Page doesn't reload** — open DevTools console; you should see `[hot-reload] reloading...` on each change. If you see SSE 404s, you're hitting a different server.
 - **`orbit.html not found yet`** — placeholder shown when the file doesn't exist; it'll flip to the real renderer the moment the notebook cell finishes writing it.
 
+## Episode data cache
+
+`download_episodes.py` reads `manifest.csv` and downloads daily Kaggle episode datasets into `episode_data/<YYYY-MM-DD>/`. Each day is a folder of replay JSON files (`{episode_id}.json`) plus that day's `manifest.csv`. Cached days are skipped unless you pass `--force`.
+
+Requires the [Kaggle CLI](https://github.com/Kaggle/kaggle-api) and API credentials (see `orbit-wars-data/agents.md`):
+
+```bash
+pip install kaggle
+mkdir -p ~/.kaggle
+# paste token from https://www.kaggle.com/settings/api
+chmod 600 ~/.kaggle/access_token
+```
+
+### Run
+
+```bash
+source .venv/bin/activate
+python download_episodes.py                         # all days in manifest.csv (~1 TB)
+python download_episodes.py --date 2026-04-16         # one day
+python download_episodes.py --from 2026-06-01 --to 2026-06-21
+python download_episodes.py --dry-run                 # show planned downloads
+python download_episodes.py --date 2026-04-16 --force   # redownload even if cached
+python download_episodes.py --output /data/episodes   # custom cache root
+```
+
+## Winner-game dataset
+
+`build_dataset.py` builds a compact training dataset of *winning* games out of the Parquet DB. It (1) quality-filters games, (2) computes per-player win-rate **within each player count** (2p baseline ~50%, 4p ~25%), (3) keeps players above a per-group win-rate / min-games bar, (4) keeps the games those players *won*, and (5) extracts the heavy tables filtered to just those episodes. Everything is config-driven by `dataset_config.yaml`, and the resolved config is written into the output dir so each dataset is self-describing/reproducible.
+
+Prereq: a Parquet DB at `parquet_dir` (default `parquet_out/`), produced by `generate_parquet_db.py`. `fleet_state` additionally needs the raw replay JSONs in `data_root` (see *Episode data cache*) — missing JSONs are skipped/counted and backfilled on re-run.
+
+### Run
+
+```bash
+source .venv/bin/activate
+python build_dataset.py                         # uses dataset_config.yaml
+python build_dataset.py --config other.yaml
+python build_dataset.py --dry-run               # print selection stats only; write nothing
+python build_dataset.py --group 2:0.6:50 --group 4:0.35:25   # replace per-count bars (N:winrate:min_games)
+python build_dataset.py --max-silent 50         # override max_silent_ticks
+python build_dataset.py --out-dir other_out     # override out_dir
+python build_dataset.py --no-planet-state       # skip heavy planet_state (~670MB)
+python build_dataset.py --no-fleet-state        # skip fleet_state JSON parse
+python build_dataset.py --workers 8             # parallel workers for fleet_state parse
+```
+
+`--dry-run` is the fast way to tune thresholds: it prints per-group player/game counts and the top selected players without touching disk.
+
+### Output (`out_dir`, default `dataset_out/`)
+
+| File | Contents |
+| ---- | -------- |
+| `selected_games.parquet` | one row per won game — the spine; carries `winner_slot` + episode metadata (join key: `episode_id`). |
+| `selected_players.parquet` | players that cleared the bar (`name, games, wins, win_rate, n_players`). |
+| `player_stats.parquet` | win-rate stats for *all* players per group (pre-threshold). |
+| `games/actions.parquet` | winner+opponent fleet commands (the action targets). |
+| `games/tick_summary.parquet` | per-tick per-slot aggregates (cheap state context). |
+| `games/episode_planets.parquet` | initial board layout per game. |
+| `games/planet_state.parquet` | per-planet per-tick `(owner, ships)` trajectory (heavy; opt-in). |
+| `games/fleet_state.parquet` | per-fleet per-tick `(x, y, angle, from_planet_id, ships)`, parsed from raw replays (opt-in). |
+| `resolved_config.yaml` | the exact config used + selected player/game counts. |
+
+Tune `dataset_config.yaml` for the filter (`end_reasons`, `max_silent_ticks`, `require_no_froze`), per-count selection (`groups`), `chunk_size_n` (recorded for the downstream encoder, not applied here), and which heavy tables to extract (`include_*`).
+
 ## Files
 
 - `getting-started.ipynb` — tutorial walking through observations, agent design, and submission.
@@ -60,4 +124,9 @@ To change the matchup, edit the `AGENTS` list at the top of `run_harness.py` (e.
 - `run_harness.py` — runs an `orbit_wars` match using agents from `main.py` and writes `orbit.html`.
 - `orbit.html` — generated replay viewer (gitignore-worthy; large).
 - `serve_orbit.py` — hot-reload dev server for `orbit.html`.
+- `download_episodes.py` — download and cache daily episode datasets from `manifest.csv`.
+- `manifest.csv` — index of daily Kaggle episode datasets.
+- `generate_parquet_db.py` — parse cached replay JSONs into the Parquet DB (`parquet_out/`).
+- `build_dataset.py` — select winning games + extract heavy tables into a training dataset (`dataset_out/`).
+- `dataset_config.yaml` — config consumed by `build_dataset.py`.
 - `LLMLOG.MD` — log of agent-driven changes.
