@@ -1,0 +1,32 @@
+# Optional training config for train_orbit.py
+# Usage: python train_orbit.py train --config orbit_train.yaml
+
+feature:
+  p_max: 60
+  action_horizon: 4
+  planet_feature_dim: 12
+  global_feature_dim: 9
+  action_dim: 4
+  max_game_tick: 500
+
+model:
+  d_model: 128
+  n_heads: 4
+  n_layers: 2
+  dropout: 0.1
+  num_timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.2
+
+train:
+  checkpoint_dir: checkpoints_v3
+  batch_size: 512 
+  num_workers: 16 
+  lr: 0.0012
+  epochs: 5 
+  episode_cache_size: 4
+  train_fraction: 0.80
+  valid_fraction: 0.10
+  log_every: 500
+  save_every: 10000
+  eval_max_batches: 50
